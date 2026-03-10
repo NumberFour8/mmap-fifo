@@ -798,3 +798,84 @@ fn test_randomized_model_comparison() {
         );
     }
 }
+
+#[test]
+fn test_visit() -> std::io::Result<()> {
+    let dir = tempdir()?;
+    let mut fifo: MmapFifo<u32> = MmapFifo::new(dir.path(), 1024)?;
+
+    fifo.push(&1)?;
+    fifo.push(&2)?;
+    fifo.push(&3)?;
+
+    // Visit without changes
+    let mut seen = Vec::new();
+    fifo.visit(|&item| {
+        seen.push(item);
+        None
+    })?;
+    assert_eq!(seen, vec![1, 2, 3]);
+
+    // Visit with changes (replacing 2 with 20)
+    fifo.visit(|&item| if item == 2 { Some(20) } else { None })?;
+
+    // Verify changes via pop
+    assert_eq!(fifo.pop()?, Some(1));
+    assert_eq!(fifo.pop()?, Some(20));
+    assert_eq!(fifo.pop()?, Some(3));
+    assert_eq!(fifo.pop()?, None);
+
+    Ok(())
+}
+
+#[test]
+fn test_visit_size_mismatch() -> std::io::Result<()> {
+    let dir = tempdir()?;
+    let mut fifo: MmapFifo<String> = MmapFifo::new(dir.path(), 1024)?;
+
+    fifo.push(&"hello".to_string())?;
+
+    // Replacing "hello" (5 bytes) with "world!" (6 bytes) should fail
+    let result = fifo.visit(|s| if s == "hello" { Some("world!".to_string()) } else { None });
+
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(e.to_string().contains("size mismatch"));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_visit_fifo_order() -> std::io::Result<()> {
+    let dir = tempdir()?;
+    let mut fifo: MmapFifo<u32> = MmapFifo::new(dir.path(), 1024)?;
+
+    // Push 100 items
+    for i in 0..100 {
+        fifo.push(&i)?;
+    }
+
+    // Pop 10 items to move read_pos
+    for i in 0..10 {
+        assert_eq!(fifo.pop()?, Some(i));
+    }
+
+    // Push another 100 items (this will definitely span multiple pages)
+    for i in 100..200 {
+        fifo.push(&i)?;
+    }
+
+    // Visit remaining items (10..200)
+    let mut seen = Vec::new();
+    fifo.visit(|&item| {
+        seen.push(item);
+        None
+    })?;
+
+    let expected: Vec<u32> = (10..200).collect();
+    assert_eq!(seen, expected, "Visit did not follow FIFO order");
+
+    Ok(())
+}

@@ -319,14 +319,130 @@ where
         self.len
     }
 
+    /// Visits each item in the queue in order.
+    ///
+    /// The closure `f` is called with a reference to the currently visited item.
+    /// If the closure returns `Some(new_item)`, the visited item will be replaced by
+    /// the new item in the queue's persistent storage.
+    ///
+    /// # Important
+    /// The serialized size of the `new_item` **must be exactly the same** as the
+    /// serialized size of the original item. If the size differs, this method returns
+    /// an `std::io::Error`.
+    ///
+    /// # Errors
+    /// Returns `std::io::Error` if:
+    /// * There's an issue reading or writing to the memory-mapped files.
+    /// * Deserialization of an existing item fails.
+    /// * Serialization of the replacement item fails.
+    /// * The replacement item's serialized size does not match the original.
+    pub fn visit<F>(&mut self, mut f: F) -> std::io::Result<()>
+    where
+        F: FnMut(&T) -> Option<T>,
+    {
+        let mut pos = self.read_pos;
+
+        loop {
+            // Check if the traversal reached the end: the current traversal position matches the write position
+            if pos.page_idx == self.write_pos.page_idx && pos.offset == self.write_pos.offset {
+                break;
+            }
+
+            let page_idx = pos.page_idx;
+            let offset = pos.offset;
+
+            // Check if the current page is finished: 4 bytes for length prefix must fit
+            if offset + 4 > self.page_size {
+                if page_idx + 1 < self.pages.len() {
+                    // Move to the next page
+                    pos.page_idx += 1;
+                    pos.offset = 0;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            let page = &self.pages[page_idx];
+            let mut len_bytes = [0u8; 4];
+            len_bytes.copy_from_slice(&page.mmap[offset..offset + 4]);
+            let raw_len = u32::from_le_bytes(len_bytes);
+
+            // raw_len == 0 indicates no more items in this page
+            if raw_len == 0 {
+                if page_idx + 1 < self.pages.len() {
+                    // Move to the next page
+                    pos.page_idx += 1;
+                    pos.offset = 0;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            // High bit set means item has been popped (we skip it during traversal)
+            let is_popped = (raw_len & 0x8000_0000) != 0;
+            let len = (raw_len & 0x7FFF_FFFF) as usize;
+            let item_total_size = 4 + len;
+
+            // Check if the full item fits in the remaining page space
+            if offset + item_total_size > self.page_size {
+                if page_idx + 1 < self.pages.len() {
+                    // Move to the next page
+                    pos.page_idx += 1;
+                    pos.offset = 0;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            // Update position for next iteration
+            pos.offset += item_total_size;
+
+            if is_popped {
+                // If it was already popped, just skip it
+                continue;
+            }
+
+            // Deserialize data
+            let data = &page.mmap[offset + 4..offset + item_total_size];
+            let item: T = postcard::from_bytes(data).map_err(std::io::Error::other)?;
+
+            // Call closure
+            if let Some(new_item) = f(&item) {
+                // Serialize new item
+                let new_bytes = postcard::to_stdvec(&new_item).map_err(std::io::Error::other)?;
+                if new_bytes.len() != len {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Replacement item serialized size mismatch: expected {} bytes, got {} bytes",
+                            len,
+                            new_bytes.len()
+                        ),
+                    ));
+                }
+
+                // Write new item to mmap
+                let page_mut = &mut self.pages[page_idx];
+                page_mut.mmap[offset + 4..offset + item_total_size].copy_from_slice(&new_bytes);
+                page_mut
+                    .mmap
+                    .flush_range(offset + 4, len)
+                    .map_err(std::io::Error::other)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns `true` if the queue is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Deletes all page files associated with this queue from the disk.
-    ///
-    /// This should be used when the queue is no longer needed and you want to clean up the storage.
+    /// Deletes all page files associated with this queue from the disk and reinitializes the queue.
     pub fn clear(&mut self) -> std::io::Result<()> {
         while let Some(page) = self.pages.pop_front() {
             let path = page.path.clone();
@@ -690,6 +806,33 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn test_visit_multi_page() -> std::io::Result<()> {
+        let dir = tempdir()?;
+        // Small page size to force multiple pages
+        let page_size = 1024;
+        // Use a type that has fixed serialized size in postcard
+        // [u8; 1] is always 1 byte.
+        let mut fifo: MmapFifo<[u8; 1]> = MmapFifo::new(dir.path(), page_size)?;
+
+        // Each [u8; 1] takes 1 byte + 4 bytes length = 5 bytes.
+        // 1024 / 5 = 204.8. 300 items will definitely use at least 2 pages.
+        for i in 0..300 {
+            fifo.push(&[(i % 255) as u8])?;
+        }
+        assert!(fifo.pages.len() > 1);
+
+        // Visit and increase all items. Size remains 1 byte.
+        fifo.visit(|&item| Some([(item[0].wrapping_add(1))]))?;
+
+        // Verify items
+        for i in 0..300 {
+            assert_eq!(fifo.pop()?, Some([(i % 255) as u8 + 1]));
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn test_large_items() {
