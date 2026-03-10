@@ -722,6 +722,13 @@ where
         }
     }
 
+    /// Returns the next element in the queue without popping it, or None if the queue is empty.
+    ///
+    /// Returns an error if there was an error reading from the queue.
+    pub fn peek(&self) -> std::io::Result<Option<T>> {
+        self.iter().next().transpose()
+    }
+
     /// Returns an iterator that pops elements from the queue.
     ///
     /// This is similar to [`into_iter`](MmapFifo::into_iter), but it does not

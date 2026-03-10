@@ -90,6 +90,34 @@ fn test_many_items() {
 }
 
 #[test]
+fn test_peek() {
+    let dir = tempdir().unwrap();
+    let mut fifo = MmapFifo::<u32, PostcardSerializer<_>>::new(dir.path(), 1024).unwrap();
+
+    // Peek on empty queue
+    assert!(matches!(fifo.peek(), Ok(None)));
+
+    // Push and peek
+    fifo.push(&1).unwrap();
+    assert!(matches!(fifo.peek(), Ok(Some(1))));
+    assert_eq!(fifo.len(), 1); // Peek doesn't remove
+
+    fifo.push(&2).unwrap();
+    assert!(matches!(fifo.peek(), Ok(Some(1)))); // Still first
+    assert_eq!(fifo.len(), 2);
+
+    // Pop and peek again
+    assert!(matches!(fifo.pop(), Ok(Some(1))));
+    assert!(matches!(fifo.peek(), Ok(Some(2))));
+    assert_eq!(fifo.len(), 1);
+
+    // Pop last item
+    assert!(matches!(fifo.pop(), Ok(Some(2))));
+    assert!(matches!(fifo.peek(), Ok(None)));
+    assert_eq!(fifo.len(), 0);
+}
+
+#[test]
 fn test_iter() {
     let dir = tempdir().unwrap();
     let mut fifo = MmapFifo::<u32, PostcardSerializer<_>>::new(dir.path(), 1024).unwrap();
