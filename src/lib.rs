@@ -380,7 +380,7 @@ where
                 }
             }
 
-            // High bit set means item has been popped (we skip it during traversal)
+            // High bit set means an item has been popped (we skip it during traversal)
             let is_popped = (raw_len & 0x8000_0000) != 0;
             let len = (raw_len & 0x7FFF_FFFF) as usize;
             let item_total_size = 4 + len;
@@ -397,7 +397,7 @@ where
                 }
             }
 
-            // Update position for next iteration
+            // Update position for the next iteration
             pos.offset += item_total_size;
 
             if is_popped {

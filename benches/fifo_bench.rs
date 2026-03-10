@@ -71,5 +71,35 @@ fn bench_load(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_push, bench_pop, bench_iter, bench_load);
+fn bench_visit(c: &mut Criterion) {
+    let temp_dir = TempDir::new().unwrap();
+    let mut fifo: MmapFifo<[u8; 8]> = MmapFifo::new(temp_dir.path(), 1024 * 1024).unwrap();
+
+    // Fill the FIFO
+    for i in 0..10000 {
+        fifo.push(&(i as u64).to_le_bytes()).unwrap();
+    }
+
+    let mut g = c.benchmark_group("visit_10000_u64_array");
+
+    g.bench_function("read_only", |b| {
+        b.iter(|| {
+            fifo.visit(|_item| None).unwrap();
+        })
+    });
+
+    g.bench_function("read_write", |b| {
+        b.iter(|| {
+            fifo.visit(|item| {
+                let val = u64::from_le_bytes(*item);
+                Some(val.wrapping_add(1).to_le_bytes())
+            })
+            .unwrap();
+        })
+    });
+
+    g.finish();
+}
+
+criterion_group!(benches, bench_push, bench_pop, bench_iter, bench_load, bench_visit);
 criterion_main!(benches);
