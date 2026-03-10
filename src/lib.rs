@@ -88,11 +88,11 @@ pub trait EntrySerializer<T> {
 }
 
 /// Default serializer and deserializer implemented using `postcard`.
-#[cfg(any(feature = "serde", test))]
+#[cfg(any(feature = "postcard", test))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PostcardSerializer<T>(PhantomData<T>);
 
-#[cfg(any(feature = "serde", test))]
+#[cfg(any(feature = "postcard", test))]
 impl<T> EntrySerializer<T> for PostcardSerializer<T>
 where
     T: serde::Serialize + for<'de> serde::Deserialize<'de>,

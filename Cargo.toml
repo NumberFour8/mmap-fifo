@@ -10,8 +10,7 @@ rust-version = "1.91"
 
 [features]
 default = []
-serde = ["dep:serde"]
-postcard = ["serde", "dep:postcard"]
+postcard = ["dep:serde", "dep:postcard"]
 
 [dependencies]
 memmap2 = "0.9"
