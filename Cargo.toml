@@ -1,0 +1,21 @@
+[package]
+name = "mmap-fifo"
+authors = ["NumberFour8"]
+description = "FIFO queue backed by memory-mapped files and serde"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3"
+
+[dependencies]
+memmap2 = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.0", features = ["use-std"] }
+
+[dev-dependencies]
+criterion = "0.8"
+tempfile = "3.26"
+rand = "0.10"
+
+[[bench]]
+name = "fifo_bench"
+harness = false
