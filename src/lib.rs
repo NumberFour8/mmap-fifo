@@ -17,29 +17,46 @@
 //! use tempfile::tempdir;
 //!
 //! # fn main() -> std::io::Result<()> {
-//! let dir = tempdir()?;
-//! let mut fifo = MmapFifo::<String>::new(dir.path(), 1024)?;
+//! /// Example serializer for u64
+//! struct Uint64BeSerializer;
 //!
-//! fifo.push(&"First item".to_string())?;
-//! fifo.push(&"Second item".to_string())?;
+//! impl mmap_fifo::EntrySerializer<u64> for Uint64BeSerializer {
+//!     type Error = std::io::Error;
+//!
+//!     fn serialize(item: &u64) -> Result<Vec<u8>, Self::Error> {
+//!         Ok(item.to_be_bytes().to_vec())
+//!     }
+//!
+//!     fn deserialize(bytes: &[u8]) -> Result<u64, Self::Error> {
+//!         Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| {
+//!             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid u64")
+//!         })?))
+//!     }
+//! }
+//!
+//! let dir = tempdir()?;
+//! let mut fifo = MmapFifo::<u64, Uint64BeSerializer>::new(dir.path(), 1024)?;
+//!
+//! fifo.push(&1)?;
+//! fifo.push(&2)?;
 //!
 //! drop(fifo);
 //!
 //! // Restore the state
-//! let mut restored_fifo = MmapFifo::<String>::load(dir.path(), 1024)?;
+//! let mut restored_fifo = MmapFifo::<u64, Uint64BeSerializer>::load(dir.path(), 1024)?;
 //! assert_eq!(restored_fifo.len(), 2);
-//! assert_eq!(restored_fifo.pop()?, Some("First item".to_string()));
-//! assert_eq!(restored_fifo.pop()?, Some("Second item".to_string()));
+//! assert_eq!(restored_fifo.pop()?, Some(1));
+//! assert_eq!(restored_fifo.pop()?, Some(2));
 //! assert_eq!(restored_fifo.pop()?, None);
 //!
 //! // Iterate without popping
-//! restored_fifo.push(&"Third item".to_string())?;
+//! restored_fifo.push(&3)?;
 //! let items: Vec<_> = restored_fifo.iter().map(|r| r.unwrap()).collect();
-//! assert_eq!(items, vec!["Third item".to_string()]);
+//! assert_eq!(items, vec![3]);
 //!
 //! // Consuming iteration
 //! let items: Vec<_> = restored_fifo.into_iter().map(|r| r.unwrap()).collect();
-//! assert_eq!(items, vec!["Third item".to_string()]);
+//! assert_eq!(items, vec![3]);
 //! # Ok(())
 //! # }
 //! ```
@@ -52,12 +69,44 @@ use std::{
 };
 
 use memmap2::{MmapMut, MmapOptions};
-use serde::{Deserialize, Serialize};
 
 /// Prefix for the names of memory-mapped page files.
 pub const PAGE_PREFIX: &str = "mmfifo_pg_";
 /// File name extension of memory-mapped page files.
 pub const PAGE_EXTENSION: &str = ".mmap";
+
+/// Serializer and deserializer of [`MmapFifo`] items.
+///
+/// The implementation should be stateless.
+pub trait EntrySerializer<T> {
+    /// Error type returned by the serializer and deserializer.
+    type Error: std::error::Error + Send + Sync + 'static;
+    /// Serializes item into a vector of bytes.
+    fn serialize(item: &T) -> Result<Vec<u8>, Self::Error>;
+    /// Deserializes bytes into an item.
+    fn deserialize(bytes: &[u8]) -> Result<T, Self::Error>;
+}
+
+/// Default serializer and deserializer implemented using `postcard`.
+#[cfg(any(feature = "serde", test))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PostcardSerializer<T>(PhantomData<T>);
+
+#[cfg(any(feature = "serde", test))]
+impl<T> EntrySerializer<T> for PostcardSerializer<T>
+where
+    T: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    type Error = postcard::Error;
+
+    fn serialize(item: &T) -> Result<Vec<u8>, Self::Error> {
+        postcard::to_stdvec(item)
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<T, Self::Error> {
+        postcard::from_bytes(bytes)
+    }
+}
 
 /// A memory-mapped file-backed FIFO queue for elements that can be serialized/deserialized.
 ///
@@ -66,16 +115,17 @@ pub const PAGE_EXTENSION: &str = ".mmap";
 /// As items are popped and a page becomes empty, it is automatically deleted from the disk.
 ///
 /// # Type Parameters
-/// * `T`: The type of elements stored in the queue. Must implement `serde::Serialize` and `serde::Deserialize`.
+/// * `T`: The type of elements stored in the queue.
+/// * `S`: The [`EntrySerializer`] for the queue items.
 #[derive(Debug)]
-pub struct MmapFifo<T> {
+pub struct MmapFifo<T, S> {
     base_path: PathBuf,
     page_size: usize,
     pages: VecDeque<MmapPage>,
     read_pos: PageOffset,
     write_pos: PageOffset,
     len: usize,
-    _marker: PhantomData<T>,
+    _m: (PhantomData<T>, PhantomData<S>),
 }
 
 #[derive(Debug)]
@@ -91,9 +141,9 @@ struct PageOffset {
     offset: usize,
 }
 
-impl<T> MmapFifo<T>
+impl<T, S> MmapFifo<T, S>
 where
-    T: Serialize + for<'de> Deserialize<'de>,
+    S: EntrySerializer<T>,
 {
     /// Creates a new `MmapFifo` at the specified `base_path`.
     ///
@@ -141,7 +191,7 @@ where
             read_pos: PageOffset::default(),
             write_pos: PageOffset::default(),
             len: 0,
-            _marker: PhantomData,
+            _m: (PhantomData, PhantomData),
         };
 
         // Initialize with one page
@@ -181,7 +231,7 @@ where
     /// * Returns `std::io::ErrorKind::InvalidInput` if the item's serialized size exceeds the `page_size`.
     /// * Returns `std::io::Error` if there's an issue writing to the memory-mapped file or creating a new page.
     pub fn push(&mut self, item: &T) -> std::io::Result<()> {
-        let bytes = postcard::to_stdvec(item).map_err(std::io::Error::other)?;
+        let bytes = S::serialize(item).map_err(std::io::Error::other)?;
         let len = bytes.len() as u32;
         let total_size = 4 + bytes.len();
 
@@ -298,7 +348,7 @@ where
 
             // Deserialize data
             let data = &page.mmap[offset + 4..offset + item_total_size];
-            let item: T = postcard::from_bytes(data).map_err(std::io::Error::other)?;
+            let item: T = S::deserialize(data).map_err(std::io::Error::other)?;
 
             // Mark as popped by setting high bit of length (allows persistence to track state)
             let page_mut = &mut self.pages[page_idx];
@@ -407,12 +457,12 @@ where
 
             // Deserialize data
             let data = &page.mmap[offset + 4..offset + item_total_size];
-            let item: T = postcard::from_bytes(data).map_err(std::io::Error::other)?;
+            let item: T = S::deserialize(data).map_err(std::io::Error::other)?;
 
             // Call closure
             if let Some(new_item) = f(&item) {
                 // Serialize new item
-                let new_bytes = postcard::to_stdvec(&new_item).map_err(std::io::Error::other)?;
+                let new_bytes = S::serialize(&new_item).map_err(std::io::Error::other)?;
                 if new_bytes.len() != len {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -565,7 +615,7 @@ where
             read_pos: PageOffset::default(),
             write_pos: PageOffset::default(),
             len: 0,
-            _marker: PhantomData,
+            _m: (PhantomData, PhantomData),
         };
 
         // Reconstruct read/write positions and count unpopped items
@@ -644,7 +694,7 @@ where
         }
 
         if !write_pos_found {
-            // All pages are completely full with non-zero headers
+            // All pages are completely full of non-zero headers
             self.write_pos = PageOffset {
                 page_idx: self.pages.len() - 1,
                 offset: self.page_size,
@@ -665,7 +715,7 @@ where
     /// Returns an iterator that yields elements of the queue without popping them.
     ///
     /// The iterator yields `std::io::Result<T>`.
-    pub fn iter(&self) -> Iter<'_, T> {
+    pub fn iter(&self) -> Iter<'_, T, S> {
         Iter {
             fifo: self,
             pos: self.read_pos,
@@ -673,11 +723,11 @@ where
     }
 }
 
-impl<T> IntoIterator for MmapFifo<T>
+impl<T, S> IntoIterator for MmapFifo<T, S>
 where
-    T: Serialize + for<'de> Deserialize<'de>,
+    S: EntrySerializer<T>,
 {
-    type IntoIter = IntoIter<T>;
+    type IntoIter = IntoIter<T, S>;
     type Item = std::io::Result<T>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -688,17 +738,14 @@ where
 /// An iterator over the elements of a [`MmapFifo`] that does not pop them.
 ///
 /// This struct is created by the [`iter`](MmapFifo::iter) method.
-pub struct Iter<'a, T>
-where
-    T: Serialize + for<'de> Deserialize<'de>,
-{
-    fifo: &'a MmapFifo<T>,
+pub struct Iter<'a, T, S> {
+    fifo: &'a MmapFifo<T, S>,
     pos: PageOffset,
 }
 
-impl<'a, T> Iterator for Iter<'a, T>
+impl<'a, T, S> Iterator for Iter<'a, T, S>
 where
-    T: Serialize + for<'de> Deserialize<'de>,
+    S: EntrySerializer<T>,
 {
     type Item = std::io::Result<T>;
 
@@ -741,12 +788,12 @@ where
                 }
             }
 
-            // High bit set means item has been popped (we skip it during traversal)
+            // High bit set means an item has been popped (we skip it during traversal)
             let is_popped = (raw_len & 0x8000_0000) != 0;
             let len = (raw_len & 0x7FFF_FFFF) as usize;
             let item_total_size = 4 + len;
 
-            // Check if full item fits in remaining page space
+            // Check if the full item fits in the remaining page space
             if offset + item_total_size > self.fifo.page_size {
                 if page_idx + 1 < self.fifo.pages.len() {
                     // Move to the next page
@@ -758,7 +805,7 @@ where
                 }
             }
 
-            // Update position for next iteration before returning a result
+            // Update the position for the next iteration before returning a result
             self.pos.offset += item_total_size;
 
             if is_popped {
@@ -768,7 +815,7 @@ where
 
             // Deserialize data
             let data = &page.mmap[offset + 4..offset + item_total_size];
-            return match postcard::from_bytes(data) {
+            return match S::deserialize(data) {
                 Ok(item) => Some(Ok(item)),
                 Err(e) => Some(Err(std::io::Error::other(e))),
             };
@@ -779,16 +826,16 @@ where
 /// An iterator that moves out of a [`MmapFifo`], popping items as it goes.
 ///
 /// This struct is created by the [`into_iter`](MmapFifo::into_iter) method.
-pub struct IntoIter<T>
+pub struct IntoIter<T, S>
 where
-    T: Serialize + for<'de> Deserialize<'de>,
+    S: EntrySerializer<T>,
 {
-    fifo: MmapFifo<T>,
+    fifo: MmapFifo<T, S>,
 }
 
-impl<T> Iterator for IntoIter<T>
+impl<T, S> Iterator for IntoIter<T, S>
 where
-    T: Serialize + for<'de> Deserialize<'de>,
+    S: EntrySerializer<T>,
 {
     type Item = std::io::Result<T>;
 
@@ -814,7 +861,7 @@ mod tests {
         let page_size = 1024;
         // Use a type that has fixed serialized size in postcard
         // [u8; 1] is always 1 byte.
-        let mut fifo: MmapFifo<[u8; 1]> = MmapFifo::new(dir.path(), page_size)?;
+        let mut fifo: MmapFifo<[u8; 1], PostcardSerializer<_>> = MmapFifo::new(dir.path(), page_size)?;
 
         // Each [u8; 1] takes 1 byte + 4 bytes length = 5 bytes.
         // 1024 / 5 = 204.8. 300 items will definitely use at least 2 pages.
@@ -837,7 +884,7 @@ mod tests {
     #[test]
     fn test_large_items() {
         let dir = tempdir().unwrap();
-        let mut fifo = MmapFifo::<Vec<u8>>::new(dir.path(), 1024).unwrap();
+        let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(dir.path(), 1024).unwrap();
 
         let item_512 = vec![0u8; 506];
         // 4 (header) + 506 (data) + 2 (postcard len overhead) = 512.
@@ -867,7 +914,7 @@ mod tests {
 
         // Create a queue with 2 pages
         {
-            let mut fifo = MmapFifo::<u32>::new(&path, 1024).unwrap();
+            let mut fifo = MmapFifo::<u32, PostcardSerializer<_>>::new(&path, 1024).unwrap();
             // u32 is 4 bytes + 4 bytes len = 8 bytes.
             // 200 * 8 = 1600 bytes, which forces at least 2 pages of 1024 bytes.
             for i in 0..200 {
@@ -879,11 +926,11 @@ mod tests {
 
         // Call `new` on the same directory. This should delete existing pages.
         {
-            let _fifo = MmapFifo::<u32>::new(&path, 1024).unwrap();
+            let _fifo = MmapFifo::<u32, PostcardSerializer<_>>::new(&path, 1024).unwrap();
         }
 
         // Now try to `load` from this directory. It should be empty because `new` cleared it.
-        let loaded = MmapFifo::<u32>::load(&path, 1024).unwrap();
+        let loaded = MmapFifo::<u32, PostcardSerializer<_>>::load(&path, 1024).unwrap();
         assert_eq!(loaded.len(), 0);
         assert!(loaded.is_empty());
     }
@@ -894,7 +941,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let page_size = 1024;
 
-        let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+        let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
 
         // 1. Item exactly fills page space
         // Header: 4 bytes
@@ -950,7 +997,7 @@ mod tests {
         let page_size = 1024;
 
         {
-            let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+            let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
             // 1. Push items that fill the first page and go into the second.
             // Page size 1024.
             // 512 bytes each (incl header 4 + overhead 2 + 506 data = 512).
@@ -970,7 +1017,7 @@ mod tests {
         }
 
         // Load back
-        let mut loaded = MmapFifo::<Vec<u8>>::load(&path, page_size).unwrap();
+        let mut loaded = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::load(&path, page_size).unwrap();
         assert_eq!(loaded.len(), 2, "Should have 2 unpopped items");
         assert_eq!(loaded.pop().unwrap().map(|v| v.len()), Some(506));
         assert_eq!(loaded.pop().unwrap().map(|v| v.len()), Some(100));
@@ -982,7 +1029,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let page_size = 1024;
-        let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+        let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
 
         // 1. Push items to fill page 0 and start page 1
         // (4 + 2 + 506 = 512). 2 items fill 1024 exactly.
@@ -1019,7 +1066,7 @@ mod tests {
         let page_size = 1024;
 
         {
-            let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+            let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
             fifo.push(&vec![0u8; 506]).unwrap();
             fifo.push(&vec![0u8; 506]).unwrap();
             fifo.push(&vec![1u8; 100]).unwrap(); // Page 1
@@ -1035,7 +1082,7 @@ mod tests {
         }
 
         // Now load. It should start from page 1.
-        let mut loaded = MmapFifo::<Vec<u8>>::load(&path, page_size).unwrap();
+        let mut loaded = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::load(&path, page_size).unwrap();
         assert_eq!(loaded.len(), 0);
         loaded.push(&vec![2u8; 50]).unwrap();
         assert_eq!(loaded.pop().unwrap(), Some(vec![2u8; 50]));
@@ -1048,7 +1095,7 @@ mod tests {
         let page_size = 1024;
 
         {
-            let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+            let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
             fifo.push(&vec![0u8; 506]).unwrap();
             fifo.push(&vec![0u8; 506]).unwrap();
             fifo.push(&vec![1u8; 506]).unwrap(); // Page 1
@@ -1066,7 +1113,7 @@ mod tests {
         }
 
         // Reload
-        let mut loaded = MmapFifo::<Vec<u8>>::load(&path, page_size).unwrap();
+        let mut loaded = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::load(&path, page_size).unwrap();
         assert_eq!(loaded.len(), 0);
         assert!(loaded.is_empty());
 
@@ -1080,7 +1127,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let page_size = 1024;
-        let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+        let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
 
         // Page 0: [Item 1 (512), Item 2 (512)]
         fifo.push(&vec![1u8; 506]).unwrap();
@@ -1114,7 +1161,7 @@ mod tests {
         let path = dir.path().to_path_buf();
 
         // 1. Valid
-        let mut fifo = MmapFifo::<u32>::new(&path, 1024).unwrap();
+        let mut fifo = MmapFifo::<u32, PostcardSerializer<_>>::new(&path, 1024).unwrap();
         fifo.push(&1).unwrap();
         drop(fifo);
 
@@ -1124,7 +1171,7 @@ mod tests {
         std::fs::write(path.join("page_1.mmap.bak"), "ignore").unwrap();
         std::fs::write(path.join("page_-1.mmap"), "ignore").unwrap();
 
-        let loaded = MmapFifo::<u32>::load(&path, 1024).unwrap();
+        let loaded = MmapFifo::<u32, PostcardSerializer<_>>::load(&path, 1024).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.pages.len(), 1);
         assert_eq!(loaded.pages[0].id, 0);
@@ -1137,7 +1184,7 @@ mod tests {
         let page_size = 1024;
 
         {
-            let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+            let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
             // Exactly fill page 0. 2 items of 512.
             fifo.push(&vec![0u8; 506]).unwrap();
             fifo.push(&vec![0u8; 506]).unwrap();
@@ -1146,7 +1193,7 @@ mod tests {
         }
 
         {
-            let mut loaded = MmapFifo::<Vec<u8>>::load(&path, page_size).unwrap();
+            let mut loaded = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::load(&path, page_size).unwrap();
             assert_eq!(loaded.len(), 2);
             assert_eq!(loaded.write_pos.offset, 1024);
 
@@ -1169,7 +1216,7 @@ mod tests {
 
         // Create page_0.mmap and page_2.mmap, but skip page_1.mmap
         {
-            let mut fifo = MmapFifo::<u32>::new(&path, page_size).unwrap();
+            let mut fifo = MmapFifo::<u32, PostcardSerializer<_>>::new(&path, page_size).unwrap();
             fifo.push(&1).unwrap(); // in page_0
 
             // Manually add page_2.mmap by tricking it or just creating files
@@ -1188,7 +1235,7 @@ mod tests {
 
         // Now we have page_0 and page_2. Page 1 is missing.
         // load() should now return an error because it checks for continuous sequence.
-        let res = MmapFifo::<u32>::load(&path, page_size);
+        let res = MmapFifo::<u32, PostcardSerializer<_>>::load(&path, page_size);
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().kind(), std::io::ErrorKind::InvalidData);
     }
@@ -1224,7 +1271,7 @@ mod tests {
         drop(mmap);
 
         // Load the queue. It should find only page_5.mmap.
-        let mut loaded = MmapFifo::<u32>::load(&path, page_size).unwrap();
+        let mut loaded = MmapFifo::<u32, PostcardSerializer<_>>::load(&path, page_size).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.pages.len(), 1);
         assert_eq!(loaded.pages[0].id, 5);
@@ -1254,7 +1301,7 @@ mod tests {
         let page_size = 1024;
 
         {
-            let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+            let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
             // (4 + 2 + 506 = 512). 2 items fill 1024 exactly.
             fifo.push(&vec![0u8; 506]).unwrap();
             fifo.push(&vec![0u8; 506]).unwrap();
@@ -1266,7 +1313,7 @@ mod tests {
             assert_eq!(fifo.pop().unwrap().map(|v| v.len()), Some(506));
         }
 
-        let mut loaded = MmapFifo::<Vec<u8>>::load(&path, page_size).unwrap();
+        let mut loaded = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::load(&path, page_size).unwrap();
         assert_eq!(loaded.len(), 2);
 
         // Push more items
@@ -1290,7 +1337,7 @@ mod tests {
         let page_size = 1024;
 
         {
-            let mut fifo = MmapFifo::<Vec<u8>>::new(&path, page_size).unwrap();
+            let mut fifo = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::new(&path, page_size).unwrap();
             // Fill 2+ pages. Each item is header (4) + overhead (2) + data (506) = 512 bytes.
             fifo.push(&vec![0u8; 506]).unwrap();
             fifo.push(&vec![0u8; 506]).unwrap(); // Page 0 is full.
@@ -1319,7 +1366,7 @@ mod tests {
         }
 
         // Reload and verify
-        let loaded = MmapFifo::<Vec<u8>>::load(&path, page_size).unwrap();
+        let loaded = MmapFifo::<Vec<u8>, PostcardSerializer<_>>::load(&path, page_size).unwrap();
         assert_eq!(loaded.len(), 0);
         assert!(loaded.is_empty());
 

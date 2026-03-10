@@ -1,22 +1,29 @@
 [package]
 name = "mmap-fifo"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["NumberFour8"]
-description = "FIFO queue backed by memory-mapped files and serde"
+description = "FIFO queue backed by memory-mapped files"
 repository = "https://github.com/NumberFour8/mmap-fifo"
 edition = "2024"
 license = "GPL-3.0-only"
 rust-version = "1.91"
 
+[features]
+default = []
+serde = ["dep:serde"]
+postcard = ["serde", "dep:postcard"]
+
 [dependencies]
 memmap2 = "0.9"
-serde = { version = "1.0", features = ["derive"] }
-postcard = { version = "1.0", features = ["use-std"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+postcard = { version = "1.1", features = ["use-std"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
 tempfile = "3.26"
 rand = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.1", features = ["use-std"] }
 
 [[bench]]
 name = "fifo_bench"
