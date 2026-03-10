@@ -44,12 +44,15 @@
 //! # }
 //! ```
 
+use std::{
+    collections::VecDeque,
+    fs::OpenOptions,
+    marker::PhantomData,
+    path::{Path, PathBuf},
+};
+
 use memmap2::{MmapMut, MmapOptions};
 use serde::{Deserialize, Serialize};
-use std::fs::{OpenOptions};
-use std::path::{Path, PathBuf};
-use std::collections::VecDeque;
-use std::marker::PhantomData;
 
 /// Prefix for the names of memory-mapped page files.
 pub const PAGE_PREFIX: &str = "mmfifo_pg_";
@@ -99,8 +102,8 @@ where
     /// to ensure a clean state for the new queue.
     ///
     /// # Arguments
-    /// * `base_path`: The directory where memory-mapped page files will be stored.
-    ///   If the directory does not exist, it will be created.
+    /// * `base_path`: The directory where memory-mapped page files will be stored. If the directory does not exist, it
+    ///   will be created.
     /// * `page_size`: The size in bytes of each memory-mapped page file.
     ///
     /// # Errors
@@ -109,7 +112,10 @@ where
     /// Also returns `ErrorKind::InvalidInput` if `page_size` is less than 1024 bytes (the minimum allowed).
     pub fn new<P: AsRef<Path>>(base_path: P, page_size: usize) -> std::io::Result<Self> {
         if page_size < 1024 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "page_size must be at least 1024 bytes"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "page_size must be at least 1024 bytes",
+            ));
         }
         let base_path = base_path.as_ref().to_path_buf();
         if !base_path.exists() {
@@ -120,9 +126,8 @@ where
                 let entry = entry?;
                 let path = entry.path();
                 let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let is_page_file = path.is_file() &&
-                    file_name.starts_with(PAGE_PREFIX) &&
-                    file_name.ends_with(PAGE_EXTENSION);
+                let is_page_file =
+                    path.is_file() && file_name.starts_with(PAGE_PREFIX) && file_name.ends_with(PAGE_EXTENSION);
 
                 if is_page_file {
                     std::fs::remove_file(path)?;
@@ -174,21 +179,25 @@ where
     /// current page, a new page is automatically created.
     ///
     /// # Errors
-    /// * Returns `std::io::ErrorKind::InvalidInput` if the item's serialized size
-    ///   exceeds the `page_size`.
-    /// * Returns `std::io::Error` if there's an issue writing to the memory-mapped file
-    ///   or creating a new page.
+    /// * Returns `std::io::ErrorKind::InvalidInput` if the item's serialized size exceeds the `page_size`.
+    /// * Returns `std::io::Error` if there's an issue writing to the memory-mapped file or creating a new page.
     pub fn push(&mut self, item: &T) -> std::io::Result<()> {
         let bytes = postcard::to_stdvec(item).map_err(std::io::Error::other)?;
         let len = bytes.len() as u32;
         let total_size = 4 + bytes.len();
 
         if total_size > self.page_size {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Item too large for page size"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Item too large for page size",
+            ));
         }
 
         if len & 0x8000_0000 != 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Item serialized size exceeds supported limit (2GB)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Item serialized size exceeds supported limit (2GB)",
+            ));
         }
 
         // Check if we need a new page
@@ -205,7 +214,9 @@ where
         page.mmap[offset..offset + 4].copy_from_slice(&len.to_le_bytes());
         // Write data
         page.mmap[offset + 4..offset + total_size].copy_from_slice(&bytes);
-        page.mmap.flush_range(offset, total_size).map_err(std::io::Error::other)?;
+        page.mmap
+            .flush_range(offset, total_size)
+            .map_err(std::io::Error::other)?;
 
         self.write_pos.offset += total_size;
         self.len += 1;
@@ -342,8 +353,8 @@ where
     ///
     /// # Arguments
     /// * `base_path`: The directory where existing memory-mapped page files are stored.
-    /// * `page_size`: The size in bytes of each memory-mapped page file. This must match
-    ///   the size used when the queue was originally created.
+    /// * `page_size`: The size in bytes of each memory-mapped page file. This must match the size used when the queue
+    ///   was originally created.
     ///
     /// # Errors
     /// Returns an `std::io::Error` if:
@@ -353,11 +364,17 @@ where
     /// * `page_size` is less than 1024 bytes (the minimum allowed).
     pub fn load<P: AsRef<Path>>(base_path: P, page_size: usize) -> std::io::Result<Self> {
         if page_size < 1024 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "page_size must be at least 1024 bytes"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "page_size must be at least 1024 bytes",
+            ));
         }
         let base_path = base_path.as_ref().to_path_buf();
         if !base_path.exists() {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "base_path does not exist"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "base_path does not exist",
+            ));
         }
 
         // Scan directory for page files: "page_<id>.mmap"
@@ -365,12 +382,17 @@ where
         for entry in std::fs::read_dir(&base_path)? {
             let entry = entry?;
             let path = entry.path();
-            let id = path.file_name()
+            let id = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 // Ensure filename matches prefix and extension
                 .filter(|name| path.is_file() && name.starts_with(PAGE_PREFIX) && name.ends_with(PAGE_EXTENSION))
                 // Extract and parse numeric ID
-                .and_then(|name| name[PAGE_PREFIX.len()..name.len() - PAGE_EXTENSION.len()].parse::<u64>().ok());
+                .and_then(|name| {
+                    name[PAGE_PREFIX.len()..name.len() - PAGE_EXTENSION.len()]
+                        .parse::<u64>()
+                        .ok()
+                });
 
             if let Some(id) = id {
                 page_files.push((id, path));
@@ -382,10 +404,14 @@ where
 
         // Check for continuous page ID sequence
         for i in 0..page_files.len().saturating_sub(1) {
-            if page_files[i+1].0 != page_files[i].0 + 1 {
+            if page_files[i + 1].0 != page_files[i].0 + 1 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Missing page file in sequence between ID {} and {}", page_files[i].0, page_files[i+1].0)
+                    format!(
+                        "Missing page file in sequence between ID {} and {}",
+                        page_files[i].0,
+                        page_files[i + 1].0
+                    ),
                 ));
             }
         }
@@ -393,16 +419,18 @@ where
         // Open and memory-map each page file
         let mut pages = VecDeque::new();
         for (id, path) in page_files {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)?;
+            let file = OpenOptions::new().read(true).write(true).open(&path)?;
 
             let metadata = file.metadata()?;
             if metadata.len() != page_size as u64 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Page file {:?} has unexpected size: expected {}, found {}", path, page_size, metadata.len())
+                    format!(
+                        "Page file {:?} has unexpected size: expected {}, found {}",
+                        path,
+                        page_size,
+                        metadata.len()
+                    ),
                 ));
             }
 
@@ -482,12 +510,18 @@ where
                 if offset == self.page_size {
                     // If we're at the end of this page and it's the last page, write_pos could be here
                     if !write_pos_found && page_idx == self.pages.len() - 1 {
-                        self.write_pos = PageOffset { page_idx, offset: self.page_size };
+                        self.write_pos = PageOffset {
+                            page_idx,
+                            offset: self.page_size,
+                        };
                         write_pos_found = true;
                     }
                     // If we still haven't found unpopped, read_pos could be at the start of the next page
                     if !first_unpopped_found {
-                        self.read_pos = PageOffset { page_idx: page_idx + 1, offset: 0 };
+                        self.read_pos = PageOffset {
+                            page_idx: page_idx + 1,
+                            offset: 0,
+                        };
                     }
                     break;
                 }
@@ -498,7 +532,7 @@ where
             // All pages are completely full with non-zero headers
             self.write_pos = PageOffset {
                 page_idx: self.pages.len() - 1,
-                offset: self.page_size
+                offset: self.page_size,
             };
         }
 
@@ -528,8 +562,8 @@ impl<T> IntoIterator for MmapFifo<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
 {
-    type Item = std::io::Result<T>;
     type IntoIter = IntoIter<T>;
+    type Item = std::io::Result<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         IntoIter { fifo: self }
@@ -622,7 +656,7 @@ where
             return match postcard::from_bytes(data) {
                 Ok(item) => Some(Ok(item)),
                 Err(e) => Some(Err(std::io::Error::other(e))),
-            }
+            };
         }
     }
 }
@@ -654,9 +688,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tempfile::{tempdir};
+    use tempfile::tempdir;
 
+    use super::*;
 
     #[test]
     fn test_large_items() {
@@ -683,8 +717,6 @@ mod tests {
         assert!(fifo.push(&too_large_item).is_err());
         assert_eq!(fifo.len(), 0);
     }
-
-
 
     #[test]
     fn test_new_on_existing_dir() {
@@ -1019,7 +1051,6 @@ mod tests {
         assert_eq!(res.err().unwrap().kind(), std::io::ErrorKind::InvalidData);
     }
 
-
     #[test]
     fn test_load_starts_at_nonzero_id() {
         let dir = tempdir().unwrap();
@@ -1035,7 +1066,8 @@ mod tests {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&page_path).unwrap();
+            .open(&page_path)
+            .unwrap();
         file.set_len(page_size as u64).unwrap();
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
 
@@ -1109,7 +1141,6 @@ mod tests {
         assert_eq!(loaded.pop().unwrap(), None);
     }
 
-
     #[test]
     fn test_clear_after_partial_pop_multi_page() {
         let dir = tempdir().unwrap();
@@ -1137,7 +1168,8 @@ mod tests {
             assert!(fifo.is_empty());
 
             // Assert disk state: only page_0.mmap should exist
-            let entries: Vec<_> = std::fs::read_dir(&path).unwrap()
+            let entries: Vec<_> = std::fs::read_dir(&path)
+                .unwrap()
                 .map(|e| e.unwrap().file_name().into_string().unwrap())
                 .collect();
             assert_eq!(entries.len(), 1);
@@ -1150,7 +1182,8 @@ mod tests {
         assert!(loaded.is_empty());
 
         // Assert disk state again
-        let entries: Vec<_> = std::fs::read_dir(&path).unwrap()
+        let entries: Vec<_> = std::fs::read_dir(&path)
+            .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(entries.len(), 1);

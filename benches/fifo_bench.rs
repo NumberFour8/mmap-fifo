@@ -1,6 +1,6 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use mmap_fifo::MmapFifo;
 use tempfile::TempDir;
 
@@ -55,7 +55,7 @@ fn bench_load(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path();
     let page_size = 64 * 1024;
-    
+
     {
         let mut fifo: MmapFifo<u64> = MmapFifo::new(path, page_size).unwrap();
         for i in 0..1000 {

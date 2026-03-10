@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
-use rand::{random, RngExt};
-use tempfile::tempdir;
+
 use mmap_fifo::{MmapFifo, PAGE_EXTENSION, PAGE_PREFIX};
+use rand::{RngExt, random};
+use tempfile::tempdir;
 
 #[test]
 fn test_load_nonexistent_dir() {
@@ -507,7 +508,10 @@ fn test_clear_disk_state() {
     // Should only have page_0.mmap (freshly re-initialized)
     assert_eq!(entries.len(), 1);
     let entry = entries[0].as_ref().unwrap();
-    assert_eq!(entry.file_name(), format!("{}0{}", PAGE_PREFIX, PAGE_EXTENSION).as_str());
+    assert_eq!(
+        entry.file_name(),
+        format!("{}0{}", PAGE_PREFIX, PAGE_EXTENSION).as_str()
+    );
 
     let metadata = entry.metadata().unwrap();
     assert_eq!(metadata.len(), 1024);
@@ -662,18 +666,30 @@ fn test_lifecycle_reuse_without_clear() {
     let mut fifo = MmapFifo::<u32>::new(dir.path(), 1024).unwrap();
 
     // Cycle 1
-    for i in 0..50 { fifo.push(&i).unwrap(); }
-    for i in 0..50 { assert_eq!(fifo.pop().unwrap(), Some(i)); }
+    for i in 0..50 {
+        fifo.push(&i).unwrap();
+    }
+    for i in 0..50 {
+        assert_eq!(fifo.pop().unwrap(), Some(i));
+    }
     assert!(fifo.is_empty());
 
     // Cycle 2: Same page reuse
-    for i in 50..100 { fifo.push(&i).unwrap(); }
-    for i in 50..100 { assert_eq!(fifo.pop().unwrap(), Some(i)); }
+    for i in 50..100 {
+        fifo.push(&i).unwrap();
+    }
+    for i in 50..100 {
+        assert_eq!(fifo.pop().unwrap(), Some(i));
+    }
     assert!(fifo.is_empty());
 
     // Cycle 3: Force rotation
-    for i in 100..300 { fifo.push(&i).unwrap(); }
-    for i in 100..300 { assert_eq!(fifo.pop().unwrap(), Some(i)); }
+    for i in 100..300 {
+        fifo.push(&i).unwrap();
+    }
+    for i in 100..300 {
+        assert_eq!(fifo.pop().unwrap(), Some(i));
+    }
     assert!(fifo.is_empty());
 
     // Cycle 4: Push after rotation and empty
@@ -683,8 +699,7 @@ fn test_lifecycle_reuse_without_clear() {
 
 #[test]
 fn test_randomized_model_comparison() {
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     let seed = std::env::var("MMAP_FIFO_SEED")
         .ok()
@@ -708,36 +723,78 @@ fn test_randomized_model_comparison() {
         if op < 45 {
             // push
             let val: u32 = rng.random();
-            fifo.push(&val).unwrap_or_else(|_| panic!("push failed at iteration {} with seed {}", i, seed));
+            fifo.push(&val)
+                .unwrap_or_else(|_| panic!("push failed at iteration {} with seed {}", i, seed));
             model.push_back(val);
         } else if op < 85 {
             // pop
-            let fifo_val = fifo.pop().unwrap_or_else(|_| panic!("pop failed at iteration {} with seed {}", i, seed));
+            let fifo_val = fifo
+                .pop()
+                .unwrap_or_else(|_| panic!("pop failed at iteration {} with seed {}", i, seed));
             let model_val = model.pop_front();
             assert_eq!(fifo_val, model_val, "Mismatch at iteration {} with seed {}", i, seed);
         } else if op < 90 {
             // iter collect
-            let fifo_items: Vec<u32> = fifo.iter().map(|r| r.unwrap_or_else(|_| panic!("iter item failed at iteration {} with seed {}", i, seed))).collect();
+            let fifo_items: Vec<u32> = fifo
+                .iter()
+                .map(|r| r.unwrap_or_else(|_| panic!("iter item failed at iteration {} with seed {}", i, seed)))
+                .collect();
             let model_items: Vec<u32> = model.iter().copied().collect();
-            assert_eq!(fifo_items, model_items, "Iterator mismatch at iteration {} with seed {}", i, seed);
+            assert_eq!(
+                fifo_items, model_items,
+                "Iterator mismatch at iteration {} with seed {}",
+                i, seed
+            );
         } else if op < 95 {
             // occasionally drop + load
             drop(fifo);
-            fifo = MmapFifo::<u32>::load(&path, page_size).unwrap_or_else(|_| panic!("load failed at iteration {} with seed {}", i, seed));
-            assert_eq!(fifo.len(), model.len(), "Len mismatch after load at iteration {} with seed {}", i, seed);
+            fifo = MmapFifo::<u32>::load(&path, page_size)
+                .unwrap_or_else(|_| panic!("load failed at iteration {} with seed {}", i, seed));
+            assert_eq!(
+                fifo.len(),
+                model.len(),
+                "Len mismatch after load at iteration {} with seed {}",
+                i,
+                seed
+            );
 
             // Verify content after load via iterator
-            let fifo_items: Vec<u32> = fifo.iter().map(|r| r.unwrap_or_else(|_| panic!("iter after load failed at iteration {} with seed {}", i, seed))).collect();
+            let fifo_items: Vec<u32> = fifo
+                .iter()
+                .map(|r| r.unwrap_or_else(|_| panic!("iter after load failed at iteration {} with seed {}", i, seed)))
+                .collect();
             let model_items: Vec<u32> = model.iter().copied().collect();
-            assert_eq!(fifo_items, model_items, "Content mismatch after load at iteration {} with seed {}", i, seed);
+            assert_eq!(
+                fifo_items, model_items,
+                "Content mismatch after load at iteration {} with seed {}",
+                i, seed
+            );
         } else {
             // clear
-            fifo.clear().unwrap_or_else(|_| panic!("clear failed at iteration {} with seed {}", i, seed));
+            fifo.clear()
+                .unwrap_or_else(|_| panic!("clear failed at iteration {} with seed {}", i, seed));
             model.clear();
-            assert_eq!(fifo.len(), 0, "Len not zero after clear at iteration {} with seed {}", i, seed);
-            assert!(fifo.is_empty(), "Not empty after clear at iteration {} with seed {}", i, seed);
+            assert_eq!(
+                fifo.len(),
+                0,
+                "Len not zero after clear at iteration {} with seed {}",
+                i,
+                seed
+            );
+            assert!(
+                fifo.is_empty(),
+                "Not empty after clear at iteration {} with seed {}",
+                i,
+                seed
+            );
         }
 
-        assert_eq!(fifo.len(), model.len(), "Len mismatch at end of iteration {} with seed {}", i, seed);
+        assert_eq!(
+            fifo.len(),
+            model.len(),
+            "Len mismatch at end of iteration {} with seed {}",
+            i,
+            seed
+        );
     }
 }
