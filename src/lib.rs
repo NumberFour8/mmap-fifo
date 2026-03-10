@@ -67,10 +67,8 @@ pub const PAGE_EXTENSION: &str = ".mmap";
 ///
 /// # Type Parameters
 /// * `T`: The type of elements stored in the queue. Must implement `serde::Serialize` and `serde::Deserialize`.
-pub struct MmapFifo<T>
-where
-    T: Serialize + for<'de> Deserialize<'de>,
-{
+#[derive(Debug)]
+pub struct MmapFifo<T> {
     base_path: PathBuf,
     page_size: usize,
     pages: VecDeque<MmapPage>,
@@ -80,6 +78,7 @@ where
     _marker: PhantomData<T>,
 }
 
+#[derive(Debug)]
 struct MmapPage {
     id: u64,
     mmap: MmapMut,
@@ -349,7 +348,7 @@ where
     /// including the read and write positions and the total number of elements.
     ///
     /// If the directory is empty or does not contain any valid page files, it will
-    /// initialize a new `MmapFifo` in that directory (equivalent to calling [`new`]).
+    /// initialize a new `MmapFifo` in that directory (equivalent to calling [`MmapFifo::new`]).
     ///
     /// # Arguments
     /// * `base_path`: The directory where existing memory-mapped page files are stored.
