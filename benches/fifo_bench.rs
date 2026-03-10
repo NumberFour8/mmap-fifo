@@ -134,5 +134,37 @@ fn bench_visit(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_push, bench_pop, bench_iter, bench_load, bench_visit);
+fn bench_drain(c: &mut Criterion) {
+    let temp_dir = TempDir::new().unwrap();
+    let mut fifo: MmapFifo<u64, Uint64BeSerializer> = MmapFifo::new(temp_dir.path(), 1024 * 1024).unwrap();
+
+    c.bench_function("drain_10000_u64", |b| {
+        b.iter_custom(|iters| {
+            let mut total_duration = std::time::Duration::ZERO;
+            for _ in 0..iters {
+                // Fill the FIFO
+                for i in 0..10000 {
+                    fifo.push(&(i as u64)).unwrap();
+                }
+
+                let start = std::time::Instant::now();
+                for item in fifo.drain() {
+                    black_box(item.unwrap());
+                }
+                total_duration += start.elapsed();
+            }
+            total_duration
+        })
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_push,
+    bench_pop,
+    bench_iter,
+    bench_load,
+    bench_visit,
+    bench_drain
+);
 criterion_main!(benches);

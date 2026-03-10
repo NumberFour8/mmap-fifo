@@ -110,6 +110,18 @@ for item in fifo.iter() {
 }
 ```
 
+### Draining the queue
+
+The `drain` method returns an iterator that pops elements from the queue without consuming it.
+
+```rust
+for item in fifo.drain() {
+    let value = item?;
+    println!("Popped: {:?}", value);
+}
+assert_eq!(fifo.len(), 0);
+```
+
 ### Visiting and Modifying elements in-place
 
 The `visit` function allows you to iterate over all items in the queue and optionally modify them in-place, provided their serialized size remains the same.

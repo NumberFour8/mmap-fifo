@@ -818,6 +818,53 @@ fn test_randomized_model_comparison() {
 }
 
 #[test]
+fn test_drain() -> std::io::Result<()> {
+    let dir = tempdir()?;
+    let mut fifo: MmapFifo<u32, PostcardSerializer<_>> = MmapFifo::new(dir.path(), 1024)?;
+
+    for i in 0..100 {
+        fifo.push(&i)?;
+    }
+
+    {
+        let mut drain = fifo.drain();
+        for i in 0..50 {
+            assert_eq!(drain.next().unwrap()?, i);
+        }
+    }
+
+    assert_eq!(fifo.len(), 50);
+
+    for i in 50..100 {
+        assert_eq!(fifo.pop()?, Some(i));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_drain_full_consumption_persists() -> std::io::Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().to_path_buf();
+
+    {
+        let mut fifo: MmapFifo<u32, PostcardSerializer<_>> = MmapFifo::new(&path, 1024)?;
+        for i in 0..100 {
+            fifo.push(&i)?;
+        }
+        let drained: Vec<_> = fifo.drain().collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(drained, (0..100).collect::<Vec<_>>());
+        assert!(fifo.is_empty());
+    }
+
+    let mut loaded: MmapFifo<u32, PostcardSerializer<_>> = MmapFifo::load(&path, 1024)?;
+    assert!(loaded.is_empty());
+    loaded.push(&42)?;
+    assert_eq!(loaded.pop()?, Some(42));
+    Ok(())
+}
+
+#[test]
 fn test_visit() -> std::io::Result<()> {
     let dir = tempdir()?;
     let mut fifo: MmapFifo<u32, PostcardSerializer<_>> = MmapFifo::new(dir.path(), 1024)?;

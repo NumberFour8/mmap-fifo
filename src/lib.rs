@@ -721,6 +721,14 @@ where
             pos: self.read_pos,
         }
     }
+
+    /// Returns an iterator that pops elements from the queue.
+    ///
+    /// This is similar to [`into_iter`](MmapFifo::into_iter), but it does not
+    /// consume the `MmapFifo` object.
+    pub fn drain(&mut self) -> Drain<'_, T, S> {
+        Drain { fifo: self }
+    }
 }
 
 impl<T, S> IntoIterator for MmapFifo<T, S>
@@ -834,6 +842,31 @@ where
 }
 
 impl<T, S> Iterator for IntoIter<T, S>
+where
+    S: EntrySerializer<T>,
+{
+    type Item = std::io::Result<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.fifo.pop() {
+            Ok(Some(item)) => Some(Ok(item)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+/// An iterator that pops elements from a [`MmapFifo`].
+///
+/// This struct is created by the [`drain`](MmapFifo::drain) method.
+pub struct Drain<'a, T, S>
+where
+    S: EntrySerializer<T>,
+{
+    fifo: &'a mut MmapFifo<T, S>,
+}
+
+impl<'a, T, S> Iterator for Drain<'a, T, S>
 where
     S: EntrySerializer<T>,
 {

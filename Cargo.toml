@@ -1,6 +1,6 @@
 [package]
 name = "mmap-fifo"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["NumberFour8"]
 description = "FIFO queue backed by memory-mapped files"
 repository = "https://github.com/NumberFour8/mmap-fifo"
